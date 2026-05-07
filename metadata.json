@@ -1,0 +1,6 @@
+{
+  "name": "ASCII Shader Canvas",
+  "description": "Convert uploaded images to an ASCII style using a custom Three.js shader. Includes customizable charsets, grid sizes, and colors.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
