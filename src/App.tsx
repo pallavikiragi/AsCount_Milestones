@@ -15,6 +15,7 @@ const CHARSETS = {
 interface Milestone {
   assets: (Asset | null)[]; // Max 3 assets limit
   phrase: string;
+  audioUrl?: string;
 }
 
 interface LibraryAsset {
@@ -51,11 +52,35 @@ const DEFAULT_LIBRARY: LibraryAsset[] = (() => {
   return assets;
 })();
 
+function getSafeUrl(url: string) {
+  if (!url) return url;
+  let safeUrl = url;
+  if (safeUrl.includes('github.com') && (safeUrl.includes('/blob/') || safeUrl.includes('/raw/'))) {
+    safeUrl = safeUrl.replace('github.com', 'raw.githubusercontent.com').replace(/\/(blob|raw)\//, '/');
+  }
+  if (safeUrl.includes('raw.githubusercontent.com') && safeUrl.includes('/refs/heads/')) {
+    safeUrl = safeUrl.replace('/refs/heads/', '/');
+  }
+  if (safeUrl.includes('dropbox.com') && safeUrl.includes('dl=0')) {
+    safeUrl = safeUrl.replace('dl=0', 'raw=1');
+  }
+  return safeUrl;
+}
+
 export default function App() {
   const [milestones, setMilestones] = useState<Record<string, Milestone>>(() => {
     try {
       const saved = localStorage.getItem('ascii-milestones');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        let parsed = JSON.parse(saved) as Record<string, Milestone>;
+        // Strip out corrupted data:video strings from localStorage
+        for (const key of Object.keys(parsed)) {
+            parsed[key].assets = parsed[key].assets.map(a => 
+                (a.type === 'video' && a.url.startsWith('data:')) ? { ...a, url: '' } : a
+            );
+        }
+        return parsed;
+      }
     } catch (e) {}
     return DEFAULT_MILESTONES;
   });
@@ -63,7 +88,11 @@ export default function App() {
   const [libraryAssets, setLibraryAssets] = useState<LibraryAsset[]>(() => {
     try {
       const saved = localStorage.getItem('ascii-library');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+         let parsed = JSON.parse(saved) as LibraryAsset[];
+         parsed = parsed.filter(a => !(a.type === 'video' && a.url.startsWith('data:')));
+         return parsed;
+      }
     } catch (e) {}
     return DEFAULT_LIBRARY;
   });
@@ -78,7 +107,8 @@ export default function App() {
 
   const [transitionState, setTransitionState] = useState<'none' | 'zoom_in' | 'zoom_out' | 'finished'>('none');
   const [charSizeOverride, setCharSizeOverride] = useState<number | null>(null);
-  const [isPlaying, setIsPlaying] = useState<boolean>(true);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [hasInteracted, setHasInteracted] = useState<boolean>(false);
   
   const [isConfigLocked, setIsConfigLocked] = useState<boolean>(() => {
       return localStorage.getItem('ascii-locked') === 'true';
@@ -90,18 +120,22 @@ export default function App() {
           localStorage.setItem('ascii-library', JSON.stringify(libraryAssets));
           localStorage.setItem('ascii-config', JSON.stringify(config));
           localStorage.setItem('ascii-locked', isConfigLocked.toString());
-          alert("Assets & Config Saved \n\nNote: Local laptop files are saved only in your browser. To make sure other people can see them when sharing the URL, use public web Image/Video URLs instead.");
+          
+          const hasLocalFiles = libraryAssets.some(a => a.url.startsWith('data:') || a.url.startsWith('blob:')) || 
+                                Object.values(milestones).some(m => m.assets.some(a => a.url.startsWith('data:') || a.url.startsWith('blob:')));
+          
+          if (hasLocalFiles) {
+              alert("Assets & Config Saved.\n\nNote: You have local laptop files (like videos or images) saved. These will NOT be visible to others if you share the app, and local videos may not survive a page refresh. Consider using public web URLs for permanence.");
+          } else {
+              alert("Assets & Config Saved successfully!");
+          }
       } catch (e) {
           alert("Error saving assets: Your uploaded files might be too large for browser storage. Please use public Image URLs instead.");
       }
   };
 
   const [config, setConfig] = useState<AsciiConfig>(() => {
-    try {
-      const saved = localStorage.getItem('ascii-config');
-      if (saved) return JSON.parse(saved);
-    } catch(e) {}
-    return {
+    const defaults: AsciiConfig = {
       charSet: CHARSETS.standard,
       charSize: 10,
       colorize: false,
@@ -111,15 +145,43 @@ export default function App() {
       overlayNumber: '10',
       phraseSize: 24,
       brightness: 1.0,
-      contrast: 1.0
+      contrast: 1.0,
+      backgroundAudioUrl: 'https://github.com/pallavikiragi/AsCount_Milestones/raw/refs/heads/main/fullvoiceover.mp3'
     };
+    try {
+      const saved = localStorage.getItem('ascii-config');
+      if (saved) {
+         return { ...defaults, ...JSON.parse(saved) };
+      }
+    } catch(e) {}
+    return defaults;
   });
 
   useEffect(() => {
-    setConfig(c => ({ ...c, overlayNumber: activeNumber }));
-  }, [activeNumber]);
+    setConfig(c => ({ ...c, overlayNumber: transitionState === 'finished' ? '' : activeNumber }));
+  }, [activeNumber, transitionState]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Background Audio Player
+  useEffect(() => {
+    const safeAudioUrl = getSafeUrl(config.backgroundAudioUrl || '');
+    if (safeAudioUrl && !backgroundAudioRef.current) {
+      backgroundAudioRef.current = new Audio(safeAudioUrl);
+      backgroundAudioRef.current.loop = false;
+    } else if (backgroundAudioRef.current && safeAudioUrl !== backgroundAudioRef.current.src) {
+      backgroundAudioRef.current.src = safeAudioUrl;
+    }
+
+    if (backgroundAudioRef.current) {
+      if (isPlaying && transitionState !== 'finished') {
+        backgroundAudioRef.current.play().catch(e => console.error("Audio play failed:", e));
+      } else {
+        backgroundAudioRef.current.pause();
+      }
+    }
+  }, [config.backgroundAudioUrl, isPlaying, transitionState]);
 
   const addAssetToLibrary = (url: string, type: 'image' | 'video' | 'gif') => {
     const newAsset: LibraryAsset = { id: Date.now().toString() + Math.random().toString(36).slice(2, 5), url, type };
@@ -154,14 +216,19 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-        const dataUrl = event.target?.result as string;
-        const type = file.type.startsWith('video/') ? 'video' : file.type === 'image/gif' ? 'gif' : 'image';
-        
-        addAssetToLibrary(dataUrl, type);
-    };
-    reader.readAsDataURL(file);
+    if (file.type.startsWith('video/')) {
+        const objectUrl = URL.createObjectURL(file);
+        addAssetToLibrary(objectUrl, 'video');
+    } else {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const dataUrl = event.target?.result as string;
+            const type = file.type === 'image/gif' ? 'gif' : 'image';
+            
+            addAssetToLibrary(dataUrl, type);
+        };
+        reader.readAsDataURL(file);
+    }
     e.target.value = '';
   };
 
@@ -235,6 +302,13 @@ export default function App() {
          }
       });
       return () => controls.stop();
+    } else if (transitionState === 'finished') {
+      const controls = animate(config.charSize, 4096, {
+         duration: 4,
+         ease: 'easeInOut',
+         onUpdate: (latest) => setCharSizeOverride(latest),
+      });
+      return () => controls.stop();
     }
   }, [transitionState, config.charSize, activeNumber]);
 
@@ -248,6 +322,10 @@ export default function App() {
     setTransitionState('none');
     setCharSizeOverride(null);
     setIsPlaying(true);
+    if (backgroundAudioRef.current) {
+       backgroundAudioRef.current.currentTime = 0;
+       backgroundAudioRef.current.play().catch(e => console.error(e));
+    }
   };
 
   const loadDefaultAssets = () => {
@@ -344,9 +422,9 @@ export default function App() {
                         {asset ? (
                           <>
                             {asset.type === 'video' ? (
-                              <video src={asset.url} className="w-full h-full object-cover opacity-80 group-hover:opacity-100" />
+                              <video src={getSafeUrl(asset.url) || undefined} className="w-full h-full object-cover opacity-80 group-hover:opacity-100" />
                             ) : (
-                              <img src={asset.url} className="w-full h-full object-cover opacity-80 group-hover:opacity-100" />
+                              <img src={getSafeUrl(asset.url) || undefined} className="w-full h-full object-cover opacity-80 group-hover:opacity-100" />
                             )}
                             <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
                               <span className="text-[9px] text-white font-medium px-2 py-0.5 border border-white/50 rounded">Change</span>
@@ -507,6 +585,21 @@ export default function App() {
               </div>
             </section>
 
+            {/* Global Audio */}
+            <section>
+              <h3 className="text-[11px] uppercase tracking-widest text-[#909090] font-bold mb-4">Background Audio</h3>
+              <div className="space-y-3">
+                <label className="text-[11px] font-medium block">Audio URL (mp3)</label>
+                <input 
+                  type="text" 
+                  value={config.backgroundAudioUrl || ''}
+                  onChange={e => setConfig(c => ({ ...c, backgroundAudioUrl: e.target.value }))}
+                  placeholder="https://example.com/audio.mp3"
+                  className="w-full bg-[#F9F9F9] border border-[#E0E0E0] rounded text-[11px] px-3 py-2 outline-none focus:border-black transition-colors"
+                />
+              </div>
+            </section>
+
             {/* Colors */}
             {!config.colorize && (
               <section>
@@ -556,16 +649,28 @@ export default function App() {
                        className="w-full px-2 py-2 border border-[#E0E0E0] rounded text-[11px] focus:outline-none focus:border-black"
                        onKeyDown={(e) => {
                          if (e.key === 'Enter' && e.currentTarget.value) {
+                             let url = e.currentTarget.value.trim();
+                             
+                             // Auto-convert github links to raw
+                             if (url.includes('github.com') && (url.includes('/blob/') || url.includes('/raw/'))) {
+                                url = url.replace('github.com', 'raw.githubusercontent.com').replace(/\/(blob|raw)\//, '/');
+                             }
+                             // Auto-convert dropbox links
+                             if (url.includes('dropbox.com') && url.includes('dl=0')) {
+                                url = url.replace('dl=0', 'raw=1');
+                             }
+                             
                              let type = 'image';
-                             if (e.currentTarget.value.match(/\.(mp4|webm|mov)$/i)) type = 'video';
-                             else if (e.currentTarget.value.match(/\.gif$/i)) type = 'gif';
-                             addAssetToLibrary(e.currentTarget.value, type as any);
+                             if (url.match(/\.(mp4|webm|mov|ogg)(?:\?.*)?$/i)) type = 'video';
+                             else if (url.match(/\.gif(?:\?.*)?$/i)) type = 'gif';
+                             
+                             addAssetToLibrary(url, type as any);
                              e.currentTarget.value = '';
                          }
                        }}
                      />
-                     <p className="text-[9px] text-[#A0A0A0] leading-tight px-1">
-                       Use direct raw links. For Dropbox, change <b>dl=0</b> to <b>raw=1</b>.
+                     <p className="text-[9px] text-[#A0A0A0] leading-tight px-1 mt-1">
+                       Use direct raw links. For Dropbox, change <b>dl=0</b> to <b>raw=1</b>. Supported video formats: MP4, WebM. (MOV may not play in all browsers).
                      </p>
                    </div>
                    <div className="flex items-center gap-2">
@@ -594,9 +699,9 @@ export default function App() {
                          }}
                        >
                           {asset.type === 'video' ? (
-                             <video src={asset.url} className="w-full h-full object-cover" />
+                             <video src={getSafeUrl(asset.url)} autoPlay muted loop playsInline className="w-full h-full object-cover" />
                           ) : (
-                             <img src={asset.url} className="w-full h-full object-cover" />
+                             <img src={getSafeUrl(asset.url)} className="w-full h-full object-cover" />
                           )}
                           
                           {pickingSlot !== null && (

@@ -17,6 +17,7 @@ export interface AsciiConfig {
   bgColor: string;
   textColor: string;
   overlayNumber: string;
+  backgroundAudioUrl?: string;
   phraseSize?: number;
   brightness: number;
   contrast: number;
@@ -58,31 +59,79 @@ function AsciiScene({ asset, config }: AsciiSceneProps) {
     let isMounted = true;
     let videoElement: HTMLVideoElement | null = null;
     
+    let safeUrl = asset.url;
+    if (!safeUrl) return;
+    
+    if (safeUrl.includes('github.com') && (safeUrl.includes('/blob/') || safeUrl.includes('/raw/'))) {
+      safeUrl = safeUrl.replace('github.com', 'raw.githubusercontent.com').replace(/\/(blob|raw)\//, '/');
+    }
+    if (safeUrl.includes('dropbox.com') && safeUrl.includes('dl=0')) {
+      safeUrl = safeUrl.replace('dl=0', 'raw=1');
+    }
+    
     if (asset.type === 'video') {
       setGifFrames([]);
       videoElement = document.createElement('video');
-      videoElement.src = asset.url;
-      videoElement.crossOrigin = 'anonymous';
       videoElement.loop = false;
       videoElement.muted = true;
       videoElement.playsInline = true;
       
-      const tex = new THREE.VideoTexture(videoElement);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      
-      videoElement.onloadeddata = () => {
-        if (!isMounted) return;
-        setTexture((prevTexture) => {
-          if (prevTexture && prevTexture !== gifTexture) prevTexture.dispose();
-          return tex;
-        });
-        setImageAspect(videoElement!.videoWidth / videoElement!.videoHeight);
+      const setupVideo = (srcUrl: string) => {
+        if (!videoElement) return;
+        videoElement.src = srcUrl;
+        if (!srcUrl.startsWith('data:') && !srcUrl.startsWith('blob:')) {
+          videoElement.crossOrigin = 'anonymous';
+        }
+        
+        const tex = new THREE.VideoTexture(videoElement);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        
+        videoElement.onloadeddata = () => {
+          if (!isMounted) return;
+          setTexture((prevTexture) => {
+            if (prevTexture && prevTexture !== gifTexture) prevTexture.dispose();
+            return tex;
+          });
+          setImageAspect(videoElement!.videoWidth / videoElement!.videoHeight);
+        };
+
+        videoElement.onerror = () => {
+          console.error("Video load failed: The URL might not be a valid video, or blocked by CORS. URL:", srcUrl);
+        };
+        
+        videoElement.play().catch(e => console.error("Video play failed:", e));
       };
-      
-      videoElement.play().catch(e => console.error("Video play failed:", e));
+
+      if (safeUrl.includes('raw.githubusercontent.com') || safeUrl.includes('dropbox.com')) {
+        // Fix for /refs/heads/main/ in github links
+        let fetchUrl = safeUrl;
+        if (fetchUrl.includes('raw.githubusercontent.com')) {
+          fetchUrl = fetchUrl.replace('/refs/heads/', '/');
+        }
+        
+        fetch(fetchUrl)
+          .then(res => {
+             if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+             return res.blob();
+          })
+          .then(blob => {
+            if (!isMounted) return;
+            // Force mime type to video/mp4 as raw github files are often text/plain
+            const videoBlob = new Blob([blob], { type: 'video/mp4' });
+            const objUrl = URL.createObjectURL(videoBlob);
+            setupVideo(objUrl);
+          })
+          .catch(err => {
+            console.error("Failed to fetch video as blob:", err);
+            // fallback
+            setupVideo(fetchUrl);
+          });
+      } else {
+        setupVideo(safeUrl);
+      }
     } else if (asset.type === 'gif') {
       // Decode GIF frames
-      fetch(asset.url)
+      fetch(safeUrl)
         .then(res => res.arrayBuffer())
         .then(buff => {
           if (!isMounted) return;
@@ -101,7 +150,7 @@ function AsciiScene({ asset, config }: AsciiSceneProps) {
       setGifFrames([]);
       const loader = new THREE.TextureLoader();
       loader.load(
-        asset.url,
+        safeUrl,
         (tex) => {
           if (!isMounted) return;
           tex.colorSpace = THREE.SRGBColorSpace;

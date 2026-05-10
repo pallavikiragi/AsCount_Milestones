@@ -33,12 +33,29 @@ export const fragmentShader = `
 
   void main() {
       // Calculate how many character blocks fit in the screen plane
-      vec2 gridCount = floor(uResolution / uCharSize);
+      vec2 gridCount = max(vec2(1.0), floor(uResolution / uCharSize));
       
       // Determine the coordinate of the current block
       vec2 blockUv = floor(vUv * gridCount) / gridCount;
       // Get the center of current block to sample image color consistently per block
       vec2 centerUv = blockUv + (0.5 / gridCount);
+      
+      // Calculate aspect-corrected local UVs if we are in extreme pixelation (gridCount == 1.0)
+      vec2 localUv = fract(vUv * gridCount);
+      float maskOut = 0.0;
+      if (gridCount.x == 1.0 || gridCount.y == 1.0) {
+          // Calculate the aspect ratio to keep the single character square
+          float screenAspect = uResolution.x / max(uResolution.y, 1.0);
+          vec2 center = vec2(0.5);
+          if (screenAspect > 1.0) {
+               localUv.x = (localUv.x - 0.5) * screenAspect + 0.5;
+          } else {
+               localUv.y = (localUv.y - 0.5) / screenAspect + 0.5;
+          }
+          if (localUv.x < 0.0 || localUv.x > 1.0 || localUv.y < 0.0 || localUv.y > 1.0) {
+               maskOut = 1.0;
+          }
+      }
 
       // Animate the image UV slightly based on time ONLY if it is not a video/gif
       if (!uIsAnimatedBase) {
@@ -91,9 +108,6 @@ export const fragmentShader = `
       float charIndex = floor(luminance * uCharCount);
       charIndex = clamp(charIndex, 0.0, uCharCount - 1.0);
 
-      // UV coordinates relative to the current block (0.0 to 1.0)
-      vec2 localUv = fract(vUv * gridCount);
-
       // Map local block UV to the character map atlas UV
       float atlasUvX = (localUv.x + charIndex) / uCharCount;
       vec2 atlasUv = vec2(atlasUvX, localUv.y);
@@ -103,24 +117,20 @@ export const fragmentShader = `
       vec3 baseText = uColorize ? imgColor.rgb : uTextColor;
       vec3 baseBg = uColorize ? vec3(0.0) : uBgColor; // When colorized, usually keep background dark
 
-      // Boost the image color for the mask to make it stand out
-      vec3 highlightedColor = imgColor.rgb + vec3(0.4); // Brighten towards white
-      highlightedColor = clamp(highlightedColor, 0.0, 1.0);
-      // To ensure high contrast even on light patches, we mix the highlighted color
-      // with a pure white based on the image's luminance
-      highlightedColor = mix(highlightedColor, vec3(1.0), 0.3);
+      // Invert colors for the number so it stands out against the background asset color
+      vec3 invertedText = vec3(1.0) - baseText;
+      vec3 maskBg = baseText;
 
-      vec3 finalHighlightColor = highlightedColor;
-      if (!uColorize) {
-          finalHighlightColor = vec3(1.0);
-      }
-
-      // Force bright colorized text and dark background where the mask is
-      vec3 fText = mix(baseText, finalHighlightColor, numberMaskBlend);
-      vec3 fBg = mix(baseBg, vec3(0.0), numberMaskBlend);
+      vec3 fText = mix(baseText, invertedText, numberMaskBlend);
+      vec3 fBg = mix(baseBg, maskBg, numberMaskBlend);
 
       // Use char texture's red channel as a mask (white text on black background in atlas)
       vec3 finalColor = mix(fBg, fText, charTexColor.r);
+      
+      // Apply maskOut for extreme pixelation
+      if (maskOut > 0.0) {
+          finalColor = vec3(0.0);
+      }
       
       gl_FragColor = vec4(finalColor, 1.0);
   }
